@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.functions.messages import GetDialogFiltersRequest
 from telethon.tl.types import (
     MessageMediaDocument,
     MessageMediaPhoto,
@@ -38,6 +39,10 @@ CHANNELS = [
     "alexmehacarmel",
     "Israel_Police_100",
 ]
+
+# תיקיית טלגרם: כל ערוץ שנמצא בתיקייה בשם הזה בחשבון נכנס לפיד אוטומטית.
+# כדי להוסיף ערוץ, פשוט מוסיפים אותו לתיקייה באפליקציית טלגרם.
+FOLDER_NAME = "זמן ימין"
 
 HOURS_BACK = 24          # כמה שעות אחורה לשמור בפיד
 MAX_PER_CHANNEL = 150    # תקרה לכל ערוץ בכל הרצה
@@ -68,6 +73,24 @@ def media_info(msg):
     return "other", None
 
 
+async def folder_entities(client, name):
+    """מחזיר את הערוצים שבתיקיית הטלגרם בשם name (רשימה ריקה אם אין תיקייה כזו)."""
+    res = await client(GetDialogFiltersRequest())
+    filters = getattr(res, "filters", res) or []
+    out = []
+    for f in filters:
+        title = getattr(f, "title", None)
+        title = getattr(title, "text", title)  # בגרסאות חדשות הכותרת היא אובייקט
+        if not title or title.strip() != name:
+            continue
+        for peer in list(getattr(f, "pinned_peers", []) or []) + list(getattr(f, "include_peers", []) or []):
+            try:
+                out.append(await client.get_entity(peer))
+            except Exception:
+                pass
+    return out
+
+
 def reactions_total(msg):
     r = getattr(msg, "reactions", None)
     if not r or not getattr(r, "results", None):
@@ -85,9 +108,26 @@ async def main():
     posts, errors = [], []
 
     async with TelegramClient(StringSession(session), api_id, api_hash) as client:
+        targets, seen_ids = [], set()
         for ch in CHANNELS:
             try:
-                entity = await client.get_entity(ch)
+                e = await client.get_entity(ch)
+            except Exception as ex:
+                errors.append({"channel": ch, "error": f"{type(ex).__name__}: {ex}"})
+                continue
+            if e.id not in seen_ids:
+                seen_ids.add(e.id); targets.append(e)
+        folder_count = 0
+        try:
+            for e in await folder_entities(client, FOLDER_NAME):
+                if e.id not in seen_ids and hasattr(e, "title"):  # רק ערוצים וקבוצות, לא אנשים
+                    seen_ids.add(e.id); targets.append(e); folder_count += 1
+        except Exception as ex:
+            errors.append({"channel": f"folder:{FOLDER_NAME}", "error": f"{type(ex).__name__}: {ex}"})
+
+        for entity in targets:
+            ch = getattr(entity, "username", None) or f"c/{entity.id}"
+            try:
                 title = getattr(entity, "title", ch)
                 grouped_seen = set()
                 async for msg in client.iter_messages(entity, limit=MAX_PER_CHANNEL):
@@ -141,7 +181,9 @@ async def main():
         "generated_utc": now.strftime("%Y-%m-%d %H:%M"),
         "generated_israel": now.astimezone(IL).strftime("%Y-%m-%d %H:%M"),
         "hours_back": HOURS_BACK,
-        "channels": CHANNELS,
+        "channels": sorted({p["channel"] for p in posts}),
+        "folder": FOLDER_NAME,
+        "folder_channels_added": folder_count,
         "post_count": len(posts),
         "errors": errors,
         "posts": posts,
